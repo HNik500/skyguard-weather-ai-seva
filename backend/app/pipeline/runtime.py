@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
 
+from engine.layer4_spatial import haversine_distance_km
+
 from . import events as ev
 from .events import EventBroker
 from .metrics import PipelineMetrics
@@ -213,11 +215,16 @@ class PipelineRuntime:
         self.state = "WARMING_UP"
         self.started_at = time.time()
         seeded = self.processor.seed_health_from_store()
+        self._tasks = [asyncio.create_task(self._consume(), name="consumer")]
         if seeded:
             ids = [sid for sid in self.processor._last_observed]
-            n = await asyncio.to_thread(self.processor.warm_up, ids, 20)
-            log.info("warm-up: %d stations, %d observations replayed into engine state", len(ids), n)
-        self._tasks = [asyncio.create_task(self._consume(), name="consumer")]
+            async def _store_warmup():
+                try:
+                    n = await asyncio.to_thread(self.processor.warm_up, ids, 5)
+                    log.info("warm-up: %d stations, %d observations replayed into engine state", len(ids), n)
+                except Exception as e:
+                    log.warning("store warmup error: %s", e)
+            self._tasks.append(asyncio.create_task(_store_warmup(), name="store-warmup"))
         if not self.simulation.configured():
             self.simulation.live_ids = set()   # stations join the live feed once warmed
             self._tasks.append(asyncio.create_task(self._simulation_warmup(), name="sim-warmup"))
@@ -276,6 +283,7 @@ class PipelineRuntime:
                     for obs in sim.observations_at(t, [s for s in ids if self.processor._last_observed.get(s, 0.0) < t]):
                         try:
                             norm = self.prepare(obs, obs.observed_at)
+                            norm.meta["warmup"] = True
                         except RejectedObservation:
                             self.metrics.rejected.add()
                             continue
@@ -461,13 +469,131 @@ class PipelineRuntime:
             await asyncio.sleep(10.0)
             now = time.time()
             for f in self.faults.expire(now):
-                self.broker.publish(ev.FAULT_CLEARED, f.to_dict())
+                self.clear_active_fault(f)
             if now - last_prune > 600:
                 last_prune = now
                 try:
                     await asyncio.to_thread(self.store.prune, now - self.retention_h * 3600)
                 except Exception:
                     log.exception("retention prune failed")
+
+    def register_active_fault(self, f, stn: Dict[str, Any]) -> None:
+        """Immediately marks the station as having an active simulated fault and broadcasts
+        the update to all clients without waiting for ML evaluation or the periodic cycle."""
+        sid = f.station_id
+        h = self.processor.health.get(sid)
+        if h is None:
+            h = {
+                "station_id": sid,
+                "name": stn.get("name"),
+                "latitude": stn.get("latitude"),
+                "longitude": stn.get("longitude"),
+                "region": stn.get("region"),
+                "source": "SIMULATED_AWS",
+                "adapter": self.simulation.name,
+                "simulated": True,
+                "overall_status": "nominal",
+                "engine_status": "NORMAL",
+                "interpretation": "nominal",
+                "confidence": 1.0,
+                "severity": "NONE",
+                "root_cause": "NORMAL",
+                "rca_label": "No fault",
+                "triggered_layers": [],
+                "summary": "Simulated AWS station operating nominally.",
+                "values": {},
+                "last_observed_at": datetime.now(timezone.utc).isoformat(),
+                "freshness": "FRESH",
+                "cadence_s": self.simulation.cadence_s,
+            }
+            self.processor.health[sid] = h
+
+        fault_meta = f.meta() | {
+            "injection_id": f.fault_id,
+            "duration_s": f.duration_s,
+            "ends_at": f.ends_at,
+            "ends_at_iso": datetime.fromtimestamp(f.ends_at, tz=timezone.utc).isoformat(),
+            "simulation_status": "ACTIVE",
+        }
+        h["injected_fault"] = fault_meta
+        h["simulated_fault_active"] = True
+        h["fault_detection_status"] = "processing"
+
+        # Broadcast events immediately
+        fault_payload = f.to_dict() | {
+            "injection_id": f.fault_id,
+            "station_name": stn.get("name"),
+            "simulation_status": "ACTIVE",
+            "detection_status": "processing",
+        }
+        self.broker.publish(ev.FAULT_INJECTED, fault_payload)
+        self.broker.publish(ev.STATION_UPDATED, ObservationProcessor.station_event_payload(h))
+
+    def clear_active_fault(self, f) -> None:
+        """Clears an active fault on expiry or cancellation and updates all clients."""
+        sid = f.station_id
+        h = self.processor.health.get(sid)
+        if h:
+            h["injected_fault"] = None
+            h["simulated_fault_active"] = False
+            h["fault_detection_status"] = "resolved"
+            self.broker.publish(ev.STATION_UPDATED, ObservationProcessor.station_event_payload(h))
+        self.broker.publish(ev.FAULT_CLEARED, f.to_dict() | {"injection_id": f.fault_id})
+
+    async def evaluate_simulated_fault(self, f) -> Dict[str, Any]:
+        """Targeted evaluation of a simulated fault: generates modified simulated telemetry
+        for the affected station(s) immediately without waiting for the full-network periodic cycle,
+        evaluates them through the genuine 5-layer anomaly detector, and publishes truthful results."""
+        try:
+            # Yield control so HTTP response completes first (under 50ms)
+            await asyncio.sleep(0.02)
+            t = time.time()
+            sid = f.station_id
+
+            affected_ids = [sid]
+            if f.fault_type == "regional_event" and f.center and f.radius_km:
+                net = self.simulation.ensure_network()
+                for other_id, other_stn in net.stations.items():
+                    if other_id != sid:
+                        d = haversine_distance_km(f.center[0], f.center[1], other_stn.lat, other_stn.lon)
+                        if d <= f.radius_km:
+                            affected_ids.append(other_id)
+
+            # Ensure observation timestamp is strictly newer than previous observations
+            last_observed_times = [self.processor._last_observed.get(s, 0.0) for s in affected_ids]
+            t_obs = max(t, (max(last_observed_times) if last_observed_times else 0.0) + 1.0)
+
+            # Generate simulated observations for the affected station(s)
+            obs_items = self.simulation.observations_at(t_obs, affected_ids)
+            if not obs_items:
+                if f.fault_type == "dropout":
+                    h = self.processor.health.get(sid)
+                    if h:
+                        h["fault_detection_status"] = "processing"
+                        h["summary"] = f"Simulated telemetry dropout for station {sid} (no packets received)."
+                        self.broker.publish(ev.STATION_UPDATED, ObservationProcessor.station_event_payload(h))
+                return {"status": "silent_dropout", "outcomes": []}
+
+            # Evaluate through the genuine multi-layer pipeline under thread lock
+            res = await asyncio.to_thread(self.process_now, obs_items)
+
+            # Update detection status on health
+            h = self.processor.health.get(sid)
+            if h:
+                is_detected = h.get("overall_status") in ("anomaly", "suspect") and (
+                    h.get("overall_status") == "anomaly" or h.get("engine_status") in ("WARNING", "ANOMALY")
+                )
+                h["fault_detection_status"] = "detected" if is_detected else "not_detected"
+                self.broker.publish(ev.STATION_UPDATED, ObservationProcessor.station_event_payload(h))
+
+            return res
+        except Exception as e:
+            log.exception("evaluate_simulated_fault failed")
+            h = self.processor.health.get(f.station_id)
+            if h:
+                h["fault_detection_status"] = "failed"
+                self.broker.publish(ev.STATION_UPDATED, ObservationProcessor.station_event_payload(h))
+            return {"status": "error", "error": str(e)}
 
     # ── read models ─────────────────────────────────────────────────────
     def _backlogged(self) -> bool:
@@ -539,7 +665,7 @@ class PipelineRuntime:
             "stations": [ObservationProcessor.station_event_payload(h) for sid, h in list(self.processor.health.items())
                          if not self._warming(sid, h)],
 
-            "incident_counts": self.incidents.get_active_counts(source="LIVE_AWS,SIMULATED_FEED"),
+            "incident_counts": self.incidents.get_active_counts(source="LIVE_AWS"),
             "recent_events": self.broker.recent(40, feed_types),
             "system": self.system_health(compact=True),
         }

@@ -136,6 +136,9 @@ export const App: React.FC = () => {
           ...f.properties,
           status: markerStatus(live.overall_status),
           liveStatus: live.overall_status,
+          simulated_fault_active: live.simulated_fault_active ? 1 : 0,
+          fault_detection_status: live.fault_detection_status || null,
+          injected_fault: live.injected_fault || null,
           interpretation: live.interpretation,
           hasAnomaly: live.overall_status === 'anomaly' ? 1 : 0,
           severity: live.severity || 'NONE',
@@ -231,7 +234,7 @@ export const App: React.FC = () => {
             onSelectStation={selectOnMap}
             onClosePreview={() => setSelectedStation(null)}
             onViewStationDetails={openStation}
-            onOpenIncident={openIncident}
+            onOpenIncident={openOps}
             activeLayers={activeLayers}
             onToggleLayer={toggleLayer}
             basemap={basemap}
@@ -249,7 +252,7 @@ export const App: React.FC = () => {
         )}
 
         {workspace === 'station' && (selectedStation ? (
-          <StationWorkspace station={selectedStation} onBack={backToMap} onOpenIncident={openIncident} onManageIncident={openOps} onOpenStation={openStation} />
+          <StationWorkspace station={selectedStation} onBack={backToMap} onOpenIncident={openOps} onManageIncident={openOps} onOpenStation={openStation} />
         ) : (
           <div className="lv-page"><div className="lv-empty">No station selected. <button className="lv-link" onClick={backToMap}>Open the live map</button></div></div>
         ))}
@@ -266,7 +269,7 @@ export const App: React.FC = () => {
         {workspace === 'system' && <SystemWorkspace />}
 
         {workspace === 'testlab' && (
-          <TestLabWorkspace onClose={() => changeWorkspace('overview')} onOpenIncident={openIncident} onViewStation={openStation} stations={stationOptions} />
+          <TestLabWorkspace onClose={() => changeWorkspace('overview')} onOpenIncident={openOps} onViewStation={openStation} onShowOnMap={selectOnMap} stations={stationOptions} />
         )}
       </main>
     </div>

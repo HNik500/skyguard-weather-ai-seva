@@ -58,7 +58,7 @@ const RANK: Record<string, number> = { anomaly: 0, suspect: 1, degraded: 2, nomi
  */
 export const MapWorkspace = forwardRef<AtherMapHandle, MapWorkspaceProps>(({
   stationsGeoJSON, filters, onFiltersChange, regions, liveCount, warmingCount = 0, catalogueCount,
-  selectedStation, onSelectStation, onClosePreview, onViewStationDetails,
+  selectedStation, onSelectStation, onClosePreview, onViewStationDetails, onOpenIncident,
   activeLayers, onToggleLayer, basemap, onToggleBasemap, showAnomalyOverlay, onToggleAnomalyOverlay,
   isGlobeMode = false, onToggleGlobeMode, neighbors = [], isActive,
 }, ref) => {
@@ -77,14 +77,14 @@ export const MapWorkspace = forwardRef<AtherMapHandle, MapWorkspaceProps>(({
   const filtered = filters.severity !== 'all' || filters.finding !== 'all' || filters.region !== 'all';
 
   return (
-    <div className="lv-page" style={{ maxWidth: 'none', paddingTop: 16, gap: 12 }}>
-      <div className="lv-spread" style={{ flexWrap: 'wrap', gap: 12 }}>
-        <div className="a-filters">
+    <div className="lv-page sg-map-page">
+      <div className="lv-spread sg-map-top-bar" style={{ flexWrap: 'wrap', gap: 12 }}>
+        <div className="a-filters sg-filters-wrap">
           <span className="a-map-title" title="The SkyGuard AI operational fleet: every monitored AWS station">
             AWS network · {(liveCount + warmingCount).toLocaleString()} stations
           </span>
           <span className="a-filter-label" style={{ marginLeft: 8 }}>Severity</span>
-          <div className="a-filter-group">
+          <div className="a-filter-group sg-filter-scroll">
             {SEVERITY.map(([k, l]) => (
               <button key={k} className={filters.severity === k ? 'active' : ''} onClick={() => set({ severity: k })}>
                 {k !== 'all' && <span className={`lv-dot`} style={{ background: `var(--s-${k === 'anomaly' ? 'critical' : k === 'suspect' ? 'warning' : k === 'degraded' ? 'neutral' : 'nominal'})` }} />}
@@ -104,8 +104,8 @@ export const MapWorkspace = forwardRef<AtherMapHandle, MapWorkspaceProps>(({
         <span className="lv-muted a-num">{shown.toLocaleString()} stations shown</span>
       </div>
 
-      <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 360px', gap: 12, height: 'calc(100vh - 150px)', minHeight: 520 }}>
-        <div className="dashboard-map-card" style={{ height: '100%', minHeight: 0 }}>
+      <section className="sg-map-layout">
+        <div className="dashboard-map-card sg-map-card">
           <AtherMap
             ref={ref}
             stationsGeoJSON={stationsGeoJSON}
@@ -137,9 +137,9 @@ export const MapWorkspace = forwardRef<AtherMapHandle, MapWorkspaceProps>(({
           />
         </div>
 
-        <aside style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
+        <aside className="sg-map-aside">
           {selectedStation ? (
-            <StationPreviewPanel station={selectedStation} onClose={onClosePreview} onViewDetails={onViewStationDetails} />
+            <StationPreviewPanel station={selectedStation} onClose={onClosePreview} onViewDetails={onViewStationDetails} onOpenIncident={onOpenIncident} />
           ) : (
             <section className="lv-card" style={{ flex: 1, minHeight: 0 }}>
               <header className="lv-card-head">

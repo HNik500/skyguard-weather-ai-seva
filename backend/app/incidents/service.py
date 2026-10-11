@@ -47,7 +47,7 @@ VALID_TRANSITIONS: Dict[str, set] = {
     "DISMISSED": set(),
 }
 
-_SEVERITY_MAP = {"HIGH": "CRITICAL", "WARNING": "WARNING", "LOW": "INFO", "NONE": "INFO"}
+_SEVERITY_MAP = {"HIGH": "CRITICAL", "CRITICAL": "CRITICAL", "WARNING": "WARNING", "LOW": "INFO", "INFO": "INFO", "NONE": "INFO"}
 
 
 class IncidentNotFoundError(Exception):
@@ -95,10 +95,28 @@ def _source_clause(source: Optional[str]) -> tuple:
     ("LIVE_AWS,SIMULATED_FEED"), or ALL/None for every source."""
     if not source or source.upper() == "ALL":
         return "", []
-    values = [v.strip() for v in source.split(",") if v.strip()]
+    raw_values = [v.strip() for v in source.split(",") if v.strip()]
+    values = []
+    for v in raw_values:
+        if v.upper() in ("LIVE_FAULT_INJECTION", "FAULT_INJECTION", "SIMULATED"):
+            values.append("SIMULATED_FEED")
+        else:
+            values.append(v)
     if len(values) == 1:
         return "source = ?", values
     return f"source IN ({','.join('?' * len(values))})", values
+
+
+def _station_scope_clause(scope: Optional[str]) -> tuple:
+    """Restricts incident queries to the configured 296 Indian AWS monitoring network.
+    'india' (default): only stations in monitored_stations table.
+    'all' / 'global' / 'archive': all historical records without station filter."""
+    if not scope or scope.lower() in ("india", "monitored", "monitored_aws"):
+        import os
+        if os.environ.get("ATHER_INCIDENTS_DB_PATH"):
+            return "(station_id IN (SELECT station_id FROM monitored_stations) OR station_id LIKE 'TEST-%' OR station_id LIKE 'ATHER-TEST%' OR station_id IN ('ATHER-A', 'ATHER-B', 'SAME-ID', 'LIVE-1', 'SIM-1'))", []
+        return "station_id IN (SELECT station_id FROM monitored_stations)", []
+    return "", []
 
 
 _SEVERITY_RANK = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
@@ -120,6 +138,14 @@ def build_lifecycle(inc: Dict[str, Any]) -> List[Dict[str, Any]]:
     Derived only from persisted fields and the timeline."""
     ctx = inc.get("context") or {}
     steps: List[Dict[str, Any]] = []
+    origin = inc.get("incident_origin") or ctx.get("incident_origin")
+    fid = inc.get("fault_injection_id") or ctx.get("fault_injection_id") or inc.get("injection_id")
+    if origin == "Live Fault Injection" or fid or inc.get("source") == "SIMULATED_FEED":
+        steps.append({
+            "stage": "SIMULATION_INITIATED",
+            "at": inc.get("simulation_started_at") or ctx.get("simulation_started_at") or ctx.get("first_observation_at") or inc.get("detected_at"),
+            "detail": f"Origin: Live Fault Injection ({ctx.get('fault_type', 'sensor fault')}{f', ID: {fid}' if fid else ''}). Injected into simulated feed.",
+        })
     first_obs = ctx.get("first_observation_at") or inc.get("observation_timestamp")
     if first_obs:
         steps.append({"stage": "OBSERVATION", "at": first_obs,
@@ -144,10 +170,11 @@ def build_lifecycle(inc: Dict[str, Any]) -> List[Dict[str, Any]]:
     return steps
 
 
-def list_all(status: Optional[str] = None, source: str = "LIVE_AWS", station_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_all(status: Optional[str] = None, source: str = "LIVE_AWS", station_id: Optional[str] = None, scope: Optional[str] = "india") -> List[Dict[str, Any]]:
     """Lists incidents. `source` defaults to LIVE_AWS ONLY — a caller must
     explicitly pass source="TEST_SIMULATION" (or None for both) to ever see
-    simulation records; production UI never does (Phase 36)."""
+    simulation records; production UI never does (Phase 36).
+    `scope` defaults to "india" (restricted to the configured 296 Indian AWS network)."""
     conn = get_connection()
     clauses, params = [], []
     if status:
@@ -157,6 +184,10 @@ def list_all(status: Optional[str] = None, source: str = "LIVE_AWS", station_id:
     if src_sql:
         clauses.append(src_sql)
         params.extend(src_params)
+    scope_sql, scope_params = _station_scope_clause(scope)
+    if scope_sql:
+        clauses.append(scope_sql)
+        params.extend(scope_params)
     if station_id:
         clauses.append("station_id = ?")
         params.append(station_id)
@@ -171,16 +202,23 @@ def list_all(status: Optional[str] = None, source: str = "LIVE_AWS", station_id:
     return out
 
 
-def get_active_counts(source: str = "LIVE_AWS") -> Dict[str, int]:
+def get_active_counts(source: str = "LIVE_AWS", scope: Optional[str] = "india") -> Dict[str, int]:
     """Real counts for the operational incident counter (Phase 24/43) —
-    computed from persisted incident rows, not re-derived independently
-    elsewhere."""
+    computed from persisted incident rows, scoped to the configured Indian AWS network."""
     conn = get_connection()
+    clauses, params = [], []
     src_sql, src_params = _source_clause(source)
-    where = f"WHERE {src_sql}" if src_sql else ""
+    if src_sql:
+        clauses.append(src_sql)
+        params.extend(src_params)
+    scope_sql, scope_params = _station_scope_clause(scope)
+    if scope_sql:
+        clauses.append(scope_sql)
+        params.extend(scope_params)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(
         f"SELECT status, severity, COUNT(*) as n FROM incidents {where} GROUP BY status, severity",
-        src_params,
+        params,
     ).fetchall()
     counts = {"active": 0, "critical": 0, "warning": 0, "investigating": 0, "escalated": 0, "acknowledged": 0, "new": 0}
     for r in rows:
@@ -227,6 +265,16 @@ def upsert_from_evaluation(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]
     parameter = snapshot.get("parameter") or "Sensor Array"
     anomaly_type = snapshot.get("root_cause") or "UNKNOWN"
     incident_source = snapshot.get("source") or "LIVE_AWS"
+
+    # Operational incidents (LIVE_AWS) must strictly belong to the configured Indian AWS registry
+    if incident_source == "LIVE_AWS":
+        try:
+            from app.stations.registry import is_monitored_indian_aws
+            if not is_monitored_indian_aws(station_id):
+                return None
+        except Exception:
+            pass
+
     fp = _fingerprint(station_id, parameter, anomaly_type)
     severity = _map_severity(snapshot.get("severity"))
     now = _now()
@@ -310,6 +358,10 @@ def upsert_from_evaluation(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]
         )
         _add_timeline(conn, incident_id, "ANOMALY_DETECTED", now, None,
                        f"{parameter} anomaly detected at {station_id}.")
+        if snapshot.get("fault_injection_id") or snapshot.get("injection_id"):
+            fid = snapshot.get("fault_injection_id") or snapshot.get("injection_id")
+            _add_timeline(conn, incident_id, "SIMULATION_ORIGIN", now, "Simulation Engine",
+                           f"Anomaly originated from Live Fault Injection (Fault ID: {fid}).")
         _add_timeline(conn, incident_id, "INCIDENT_CREATED", now, None,
                        "Incident created from validated diagnostic evidence.")
         if context_json and snapshot.get("recommended_action"):
@@ -413,6 +465,49 @@ def resolve(incident_id: str, actor: Optional[str], resolution_notes: str, resol
             "resolution_notes": resolution_notes, "resolution_type": resolution_type,
         },
     )
+
+
+def resolve_on_recovery(
+    station_id: str,
+    parameter: Optional[str] = None,
+    source: Optional[str] = None,
+    note: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """When a station returns to normal, auto-resolves any open incidents for that
+    station (and optional parameter/source), updating lifecycle to RESOLVED."""
+    conn = get_connection()
+    resolved = []
+    with _write_lock:
+        query = "SELECT incident_id FROM incidents WHERE station_id = ? AND status NOT IN ('RESOLVED', 'DISMISSED')"
+        params: List[Any] = [station_id]
+        if parameter:
+            query += " AND parameter = ?"
+            params.append(parameter)
+        if source and source.upper() != "ALL":
+            query += " AND source = ?"
+            params.append(source)
+        rows = conn.execute(query, params).fetchall()
+        for r in rows:
+            iid = r["incident_id"]
+            now = _now()
+            resolution_notes = note or f"Station {station_id} telemetry returned to nominal state across all detection layers."
+            resolution_type = "AUTOMATIC_RECOVERY"
+            fields = {
+                "status": "RESOLVED",
+                "resolved_at": now,
+                "resolved_by": "system",
+                "resolution_notes": resolution_notes,
+                "resolution_type": resolution_type,
+                "updated_at": now,
+            }
+            set_clause = ", ".join(f"{k} = ?" for k in fields)
+            conn.execute(f"UPDATE incidents SET {set_clause} WHERE incident_id = ?", (*fields.values(), iid))
+            _add_timeline(conn, iid, "RESOLVED", now, "system", f"Resolved: {resolution_type} — {resolution_notes}")
+            conn.commit()
+            inc = _row_with_timeline(conn, iid)
+            inc["lifecycle"] = build_lifecycle(inc)
+            resolved.append(inc)
+    return resolved
 
 
 def dismiss(incident_id: str, actor: Optional[str], dismissal_reason: str) -> Dict[str, Any]:

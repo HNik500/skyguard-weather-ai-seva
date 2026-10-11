@@ -52,15 +52,24 @@ export const LiveEventFeed: React.FC<{
 }> = ({ onSelectStation, onOpenIncident, limit = 40, stationFilter }) => {
   const { feed } = useLive();
   const now = useNow(5000);
-  // One row per investigation update stream: keep only its most recent update.
+  // Keep latest update per incident and deduplicate identical deliveries per station
   const seenUpdates = new Set<string>();
+  const seenEvents = new Set<string>();
   const items = feed
     .filter((e) => !stationFilter || e.data?.station_id === stationFilter)
     .filter((e) => {
-      if (e.type !== 'INCIDENT_UPDATED') return true;
-      const id = e.data?.incident_id;
-      if (seenUpdates.has(id)) return false;
-      seenUpdates.add(id);
+      if (e.type === 'INCIDENT_UPDATED') {
+        const id = e.data?.incident_id;
+        if (id && seenUpdates.has(id)) return false;
+        if (id) seenUpdates.add(id);
+        return true;
+      }
+      const sid = e.data?.station_id;
+      if (sid) {
+        const sig = `${e.type}:${sid}:${Math.floor(e.ts / 15)}`;
+        if (seenEvents.has(sig)) return false;
+        seenEvents.add(sig);
+      }
       return true;
     })
     .slice(0, limit);
@@ -71,9 +80,10 @@ export const LiveEventFeed: React.FC<{
     <div className="lv-feed">
       {items.map((e) => {
         const d = describe(e);
+        const isSim = Boolean(e.data?.simulated || e.data?.source === 'SIMULATED_FEED' || e.data?.injected_fault || e.data?.fault_id);
         return (
           <button
-            key={`${e.id}-${e.type}`}
+            key={`${e.id || ''}-${e.type}-${e.data?.station_id || ''}-${e.ts}`}
             className={`lv-feed-item ${d.cls}`}
             onClick={() => (d.incidentId && onOpenIncident ? onOpenIncident(d.incidentId) : d.stationId && onSelectStation?.(d.stationId))}
           >
@@ -85,15 +95,14 @@ export const LiveEventFeed: React.FC<{
               </span>
               <div className="lv-feed-title">{d.title}</div>
               {d.text && <div className="lv-feed-text">{d.text}</div>}
-              {e.data?.triggered_layers && (
-                <div style={{ marginTop: 4 }} className="lv-row">
-                  {/* only layers that produced evidence — never imply the others passed */}
+              <div style={{ marginTop: 4 }} className="lv-row">
+                {e.data?.triggered_layers && (
                   <span className="lv-mono" style={{ fontSize: '0.64rem', color: 'var(--a-ink-3)' }}>
                     {e.data.triggered_layers.length ? `evidence: ${e.data.triggered_layers.join(' ')}` : 'no layer evidence'}
                   </span>
-                  {e.data.simulated && <SourceBadge simulated />}
-                </div>
-              )}
+                )}
+                {isSim && <SourceBadge simulated />}
+              </div>
             </span>
           </button>
         );

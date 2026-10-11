@@ -427,6 +427,10 @@ class ObservationProcessor:
             "active_incident_id": active_incident,
             "detection_id": det["detection_id"],
             "injected_fault": obs.meta.get("injected_fault"),
+            "simulated_fault_active": bool(obs.meta.get("injected_fault")),
+            "fault_detection_status": (
+                "detected" if det["overall_status"] in ABNORMAL else "not_detected"
+            ) if obs.meta.get("injected_fault") else None,
             "sensor_health_index": det["sensor_health_index"],
         }
         self.health[sid] = health
@@ -445,6 +449,16 @@ class ObservationProcessor:
                 self.metrics.anomalies.add()
         elif new_status not in ABNORMAL and prev_status in ABNORMAL:
             events.append((ev.STATION_RECOVERED, compact))
+            if hasattr(self.incidents, "resolve_on_recovery"):
+                try:
+                    resolved_incs = self.incidents.resolve_on_recovery(
+                        sid, source=incident_source_for(obs.source),
+                        note=f"Station {sid} recovered to nominal state ({new_status}). All 5 detection layers nominal."
+                    )
+                    for r_inc in resolved_incs:
+                        incident_events.append((ev.INCIDENT_UPDATED, incident_event_payload(r_inc)))
+                except Exception as e:
+                    log.warning("Could not auto-resolve incidents for recovered station %s: %s", sid, e)
         events.extend(incident_events)
 
         processing_ms = (time.perf_counter() - t0) * 1000.0
@@ -513,6 +527,18 @@ class ObservationProcessor:
         never open a maintenance incident."""
         if det["interpretation"] == "likely_weather_event":
             return None
+        if obs.meta.get("warmup"):
+            return None
+        if det.get("diagnosis", {}).get("root_cause") == "NORMAL" or (alert and getattr(alert, "root_cause", None) == "NORMAL"):
+            return None
+        # Operational incidents are restricted to the configured Indian AWS network
+        if obs.source != SIMULATED_SOURCE:
+            try:
+                from app.stations.registry import is_monitored_indian_aws
+                if not is_monitored_indian_aws(stn.get("id")):
+                    return None
+            except Exception:
+                pass
         status = det["overall_status"]
         persistent_fault = (status == "suspect" and consecutive >= self.incident_debounce
                             and det.get("diagnosed_fault"))
@@ -522,6 +548,13 @@ class ObservationProcessor:
             snapshot = self.stations._build_incident_snapshot(stn, source=incident_source_for(obs.source), alert=alert)
             if not snapshot:
                 return None
+            injected_f = obs.meta.get("injected_fault")
+            if injected_f:
+                fid = injected_f.get("fault_id")
+                snapshot["fault_injection_id"] = fid
+                snapshot["injection_id"] = fid
+                snapshot["incident_origin"] = "Live Fault Injection"
+                snapshot["source"] = "SIMULATED_FEED"
             snapshot["context"] = {
                 "detection_id": det["detection_id"],
                 "observation_id": obs.observation_id,
@@ -538,12 +571,20 @@ class ObservationProcessor:
                 "neighbors": det["neighbors"][:8],
                 "reference_comparison": det["reference_comparison"],
                 "layer_results": det["layer_results"],
+                "incident_origin": "Live Fault Injection" if injected_f else "Operational Telemetry",
+                "fault_injection_id": injected_f.get("fault_id") if injected_f else None,
+                "injection_id": injected_f.get("fault_id") if injected_f else None,
+                "fault_type": injected_f.get("fault_type") if injected_f else None,
+                "fault_parameter": injected_f.get("parameter") if injected_f else None,
+                "fault_severity": injected_f.get("severity") if injected_f else None,
+                "simulation_started_at": injected_f.get("started_at") if injected_f else None,
+                "simulation_ends_at": injected_f.get("ends_at") if injected_f else None,
                 "provenance": {
                     "data_source": obs.source,
                     "simulated": obs.source == SIMULATED_SOURCE,
                     "detector_version": det["provenance"]["detector_version"],
                     "pipeline_version": det["provenance"]["pipeline_version"],
-                    "injected_fault": obs.meta.get("injected_fault"),
+                    "injected_fault": injected_f,
                 },
             }
             inc = self.incidents.upsert_from_evaluation(snapshot)
@@ -570,7 +611,8 @@ class ObservationProcessor:
         keys = ("station_id", "name", "latitude", "longitude", "source", "simulated", "overall_status",
                 "engine_status", "interpretation", "confidence", "severity", "root_cause", "rca_label",
                 "triggered_layers", "values", "last_observed_at", "last_processed_at", "freshness",
-                "active_incident_id", "detection_id", "summary", "injected_fault", "watch")
+                "active_incident_id", "detection_id", "summary", "injected_fault", "watch",
+                "simulated_fault_active", "fault_detection_status")
         return {k: h.get(k) for k in keys}
 
 
@@ -590,4 +632,7 @@ def incident_event_payload(inc: Dict[str, Any]) -> Dict[str, Any]:
         "observation_count": inc.get("observation_count"),
         "created_at": inc.get("created_at"),
         "updated_at": inc.get("updated_at"),
+        "incident_origin": inc.get("incident_origin") or ctx.get("incident_origin"),
+        "fault_injection_id": inc.get("fault_injection_id") or ctx.get("fault_injection_id"),
+        "injection_id": inc.get("injection_id") or ctx.get("injection_id"),
     }

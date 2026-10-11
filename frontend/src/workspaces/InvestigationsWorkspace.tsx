@@ -28,7 +28,7 @@ export const InvestigationsWorkspace: React.FC<Props> = ({ openIncidentId, onOpe
   const [error, setError] = useState<string | null>(null);
   const last = useRef(0);
 
-  const load = () => fetchIncidents(null).then((r) => setAll(r.incidents || [])).catch((e) => setError(e.message));
+  const load = () => fetchIncidents(null, undefined, 'LIVE_AWS,SIMULATED_FEED').then((r) => setAll(r.incidents || [])).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
   useLiveEvents(['INCIDENT_CREATED', 'INCIDENT_UPDATED'], () => {
     if (Date.now() - last.current > 3000) { last.current = Date.now(); load(); }

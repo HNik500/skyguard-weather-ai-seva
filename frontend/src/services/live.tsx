@@ -38,6 +38,9 @@ export interface LiveStation {
   summary?: string;
   injected_fault?: any;
   watch?: boolean;
+  simulated_fault_active?: boolean;
+  fault_detection_status?: 'accepted' | 'processing' | 'detected' | 'not_detected' | 'failed' | string;
+  incident_origin?: string;
 }
 
 export interface LiveEvent {
@@ -72,25 +75,11 @@ interface LiveContextValue {
   lastEventAt: number | null;
   subscribe: (fn: (e: LiveEvent) => void) => () => void;
   resync: () => void;
+  applyFaultOptimistic: (fault: any) => void;
+  clearFaultOptimistic: (targetOrFaultId: string) => void;
 }
 
 const LiveContext = createContext<LiveContextValue | null>(null);
-
-function recount(stations: Map<string, LiveStation>, catalogueTotal?: number) {
-  const c: Record<string, number> = {
-    live_stations: 0, nominal: 0, suspect: 0, degraded: 0, anomaly: 0, stale: 0, watch: 0, weather_events: 0, simulated: 0, measured: 0,
-  };
-  stations.forEach((s) => {
-    c.live_stations += 1;
-    c[s.overall_status] = (c[s.overall_status] || 0) + 1;
-    if (s.freshness === 'STALE') c.stale += 1;
-    if (s.watch) c.watch += 1;
-    if (s.interpretation === 'likely_weather_event') c.weather_events += 1;
-    c[s.simulated ? 'simulated' : 'measured'] += 1;
-  });
-  if (catalogueTotal !== undefined) c.catalogue_total = catalogueTotal;
-  return c;
-}
 
 export const LiveNetworkProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [connection, setConnection] = useState<ConnectionState>('connecting');
@@ -109,14 +98,13 @@ export const LiveNetworkProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const dirty = useRef(false);
   const [resyncNonce, setResyncNonce] = useState(0);
 
-  // Batch station-state renders to at most one per second: a 300-station
+  // Batch regular station-state renders to at most one per second: a 300-station
   // network emits ~5 STATION_UPDATED events/s and the map only needs 1 Hz.
   useEffect(() => {
     const t = setInterval(() => {
       if (!dirty.current) return;
       dirty.current = false;
       setStationsVersion((v) => v + 1);
-      setCounts(recount(stationsRef.current, catalogueTotal.current));
     }, 1000);
     return () => clearInterval(t);
   }, []);
@@ -128,6 +116,41 @@ export const LiveNetworkProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const resync = useCallback(() => setResyncNonce((n) => n + 1), []);
 
+  const applyFaultOptimistic = useCallback((fault: any) => {
+    const sid = fault.station_id || fault.target;
+    if (!sid) return;
+    const prev = stationsRef.current.get(sid);
+    if (prev) {
+      stationsRef.current.set(sid, {
+        ...prev,
+        simulated_fault_active: true,
+        fault_detection_status: fault.detection_status || 'accepted',
+        injected_fault: fault,
+      });
+      dirty.current = false;
+      setStationsVersion((v) => v + 1);
+    }
+  }, []);
+
+  const clearFaultOptimistic = useCallback((targetOrFaultId: string) => {
+    let affected = false;
+    stationsRef.current.forEach((stn, sid) => {
+      if (sid === targetOrFaultId || stn.injected_fault?.fault_id === targetOrFaultId || stn.injected_fault?.injection_id === targetOrFaultId) {
+        stationsRef.current.set(sid, {
+          ...stn,
+          simulated_fault_active: false,
+          fault_detection_status: undefined,
+          injected_fault: undefined,
+        });
+        affected = true;
+      }
+    });
+    if (affected) {
+      dirty.current = false;
+      setStationsVersion((v) => v + 1);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     setConnection((c) => (c === 'live' ? 'reconnecting' : 'connecting'));
@@ -138,9 +161,44 @@ export const LiveNetworkProvider: React.FC<{ children: React.ReactNode }> = ({ c
       const ev: LiveEvent = { id: Number(raw.lastEventId) || 0, type, ts: (data._ts ?? Date.now() / 1000), data };
       setLastEventAt(Date.now());
       if (type === 'RESYNC_REQUIRED') { resync(); return; }
-      if (type === 'STATION_UPDATED') {
-        stationsRef.current.set(data.station_id, data);
-        dirty.current = true;
+
+      if (type === 'FAULT_INJECTED') {
+        const sid = data.station_id || data.target;
+        if (sid && stationsRef.current.has(sid)) {
+          const prev = stationsRef.current.get(sid)!;
+          stationsRef.current.set(sid, {
+            ...prev,
+            simulated_fault_active: true,
+            fault_detection_status: data.detection_status || data.fault_detection_status || 'processing',
+            injected_fault: data,
+          });
+          dirty.current = false;
+          setStationsVersion((v) => v + 1);
+        }
+      } else if (type === 'FAULT_CLEARED') {
+        const sid = data.station_id || data.target;
+        if (sid && stationsRef.current.has(sid)) {
+          const prev = stationsRef.current.get(sid)!;
+          stationsRef.current.set(sid, {
+            ...prev,
+            simulated_fault_active: false,
+            fault_detection_status: undefined,
+            injected_fault: undefined,
+          });
+          dirty.current = false;
+          setStationsVersion((v) => v + 1);
+        }
+      } else if (type === 'STATION_UPDATED') {
+        const sid = data.station_id;
+        stationsRef.current.set(sid, data);
+
+        // Immediate flush without 1-second debounce for simulated fault transitions
+        if (data.simulated_fault_active || data.injected_fault) {
+          dirty.current = false;
+          setStationsVersion((v) => v + 1);
+        } else {
+          dirty.current = true;
+        }
       } else if (type === 'SYSTEM_METRICS') {
         setSystem(data);
         if (data?.counts?.catalogue_total) catalogueTotal.current = data.counts.catalogue_total;
@@ -197,8 +255,8 @@ export const LiveNetworkProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const value = useMemo<LiveContextValue>(() => ({
     connection, pipelineAvailable, stations: stationsRef.current, stationsVersion, counts, incidentCounts, warmingIds,
-    system, feed, lastEventAt, subscribe, resync,
-  }), [connection, pipelineAvailable, stationsVersion, counts, incidentCounts, warmingIds, system, feed, lastEventAt, subscribe, resync]);
+    system, feed, lastEventAt, subscribe, resync, applyFaultOptimistic, clearFaultOptimistic,
+  }), [connection, pipelineAvailable, stationsVersion, counts, incidentCounts, warmingIds, system, feed, lastEventAt, subscribe, resync, applyFaultOptimistic, clearFaultOptimistic]);
 
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;
 };

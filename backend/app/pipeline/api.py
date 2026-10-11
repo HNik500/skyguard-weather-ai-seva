@@ -363,14 +363,28 @@ def list_faults(active: bool = False):
 
 
 @router.post("/lab/faults", status_code=201)
-def inject_fault(body: Dict[str, Any]):
+async def inject_fault(body: Dict[str, Any]):
     rt = _rt()
     if rt.simulation.status.state in ("NOT_CONFIGURED", "DISABLED"):
         raise HTTPException(status_code=409, detail="Fault injection needs the simulated feed (ATHER_SIM_ENABLED=1).")
     sid = body.get("station_id")
-    if sid not in set(rt.simulation.station_ids()):
+    if not sid or sid not in set(rt.simulation.station_ids()):
         raise HTTPException(status_code=400, detail="Faults can only be injected into stations on the simulated feed.")
     stn = rt.stations._stations[sid]
+
+    # Deduplication: check if an identical active fault is already running on this station
+    now = time.time()
+    for active_f in rt.faults.list(active_only=True):
+        if (active_f.station_id == sid and active_f.fault_type == body.get("fault_type")
+                and active_f.parameter == body.get("parameter") and active_f.active_at(now)):
+            return active_f.to_dict() | {
+                "injection_id": active_f.fault_id,
+                "simulation_status": "ACTIVE",
+                "station_name": stn.get("name"),
+                "status": "already_active",
+                "detection_status": "processing",
+            }
+
     try:
         f = rt.faults.inject(
             sid, body.get("fault_type", ""), body.get("parameter"), body.get("severity", "medium"),
@@ -380,8 +394,22 @@ def inject_fault(body: Dict[str, Any]):
         )
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
-    rt.broker.publish(ev.FAULT_INJECTED, f.to_dict() | {"station_name": stn.get("name")})
-    return f.to_dict()
+
+    # 1. Immediately associate station with active simulation on the Live Map
+    rt.register_active_fault(f, stn)
+
+    # 2. Trigger targeted ML pipeline evaluation for affected station(s) without delaying acknowledgement
+    asyncio.create_task(rt.evaluate_simulated_fault(f))
+
+    # 3. Return immediate injection acknowledgement (<300ms target)
+    return f.to_dict() | {
+        "injection_id": f.fault_id,
+        "station_name": stn.get("name"),
+        "simulation_status": "ACTIVE",
+        "start_timestamp": datetime.fromtimestamp(f.started_at, tz=timezone.utc).isoformat(),
+        "status": "accepted",
+        "detection_status": "processing",
+    }
 
 
 @router.delete("/lab/faults/{fault_id}")
@@ -390,8 +418,8 @@ def cancel_fault(fault_id: str):
     f = rt.faults.cancel(fault_id)
     if not f:
         raise HTTPException(status_code=404, detail="fault not found")
-    rt.broker.publish(ev.FAULT_CLEARED, f.to_dict())
-    return f.to_dict()
+    rt.clear_active_fault(f)
+    return f.to_dict() | {"injection_id": f.fault_id}
 
 
 # ── replay ──────────────────────────────────────────────────────────────

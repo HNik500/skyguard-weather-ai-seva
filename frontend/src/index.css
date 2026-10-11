@@ -2392,6 +2392,8 @@ body.home-active {
 .aws-tooltip-status.status-NORMAL { color: #10b981; }
 .aws-tooltip-status.status-WARNING { color: #f59e0b; }
 .aws-tooltip-status.status-ANOMALY { color: #ef4444; }
+.aws-tooltip-status.status-SIMULATED_ACTIVE { color: #c084fc; font-weight: 700; }
+.aws-tooltip-status.status-SIMULATED_ANOMALY { color: #f43f5e; font-weight: 700; }
 .aws-tooltip-status.status-OFFLINE { color: #94a3b8; }
 
 .aws-model-fallback-dot {
@@ -5501,7 +5503,45 @@ body.home-active {
 }
 .ws-marker.ws-warning { --ws-rgb: 245, 158, 11; --ws-ring-dur: 2.8s; --ws-ring-a: 0.5;  --ws-sweep-dur: 6s; --ws-sweep-a: 0.5; }
 .ws-marker.ws-anomaly { --ws-rgb: 239, 68, 68;  --ws-ring-dur: 1.9s; --ws-ring-a: 0.7;  --ws-sweep-dur: 4s; --ws-sweep-a: 0.65; }
+.ws-marker.ws-simulated_active {
+  --ws-rgb: 168, 85, 247;
+  --ws-ring-dur: 2.2s;
+  --ws-ring-a: 0.8;
+  --ws-sweep-dur: 4.5s;
+  --ws-sweep-a: 0.75;
+}
+.ws-marker.ws-simulated_anomaly {
+  --ws-rgb: 239, 68, 68;
+  --ws-ring-dur: 1.6s;
+  --ws-ring-a: 0.9;
+  --ws-sweep-dur: 3.5s;
+  --ws-sweep-a: 0.85;
+}
+.ws-marker.ws-simulated_active .ws-band { fill: #e9d5ff !important; }
+.ws-marker.ws-simulated_anomaly .ws-band { fill: #c084fc !important; }
 .ws-marker.ws-offline { --ws-rgb: 100, 116, 139; }
+
+/* Simulation indicator badge on the marker */
+.ws-sim-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  background: linear-gradient(135deg, #9333ea, #7c3aed);
+  color: #ffffff;
+  font: 800 8.5px/1 'JetBrains Mono', 'Inter', monospace;
+  letter-spacing: 0.05em;
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  pointer-events: none;
+  animation: ws-sim-pulse 2s infinite ease-in-out;
+  z-index: 12;
+}
+@keyframes ws-sim-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 8px rgba(168, 85, 247, 0.7); }
+  50% { transform: scale(1.1); box-shadow: 0 0 14px rgba(192, 132, 252, 1); }
+}
 
 /* Selected: a little larger, stronger glow, stronger radar. The rotor keeps turning. */
 .ws-marker.is-selected { --ws-base: 1.3; --ws-ring-a: 0.9; --ws-sweep-a: 0.85; }

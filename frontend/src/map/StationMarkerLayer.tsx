@@ -57,6 +57,7 @@ interface MarkerEntry {
   lngLat: [number, number];
   marker: maplibregl.Marker;
   el: HTMLDivElement;
+  simulatedFaultActive?: boolean;
 }
 
 interface StationMarkerLayerProps {
@@ -158,7 +159,7 @@ export const StationMarkerLayer: React.FC<StationMarkerLayerProps> = ({
     interface Candidate {
       key: string; kind: MarkerKind; stationId?: string; clusterId?: number; name: string;
       status: WeatherStationStatus; count: number; countLabel?: string; label?: string;
-      lngLat: [number, number]; d2: number;
+      lngLat: [number, number]; d2: number; simulatedFaultActive?: boolean;
     }
     const wanted = new Map<string, Candidate>();
     for (const f of features) {
@@ -192,6 +193,7 @@ export const StationMarkerLayer: React.FC<StationMarkerLayerProps> = ({
         wanted.set(key, {
           key, kind: 'station', stationId: String(props.id), name: String(props.name ?? props.id),
           status: toMarkerStatus(props.status), count: 1, lngLat, d2,
+          simulatedFaultActive: Boolean(props.simulated_fault_active),
         });
       }
     }
@@ -241,6 +243,7 @@ export const StationMarkerLayer: React.FC<StationMarkerLayerProps> = ({
       entriesRef.current.set(c.key, {
         key: c.key, kind: c.kind, stationId: c.stationId, clusterId: c.clusterId, name: c.name, status: c.status,
         count: c.count, countLabel: c.countLabel, label: c.label, lngLat: c.lngLat, marker, el,
+        simulatedFaultActive: c.simulatedFaultActive,
       });
       changed = true;
     }
@@ -317,6 +320,7 @@ export const StationMarkerLayer: React.FC<StationMarkerLayerProps> = ({
             label={e.label}
             neighbor={e.kind === 'station' && !!e.stationId && neighborSet.has(e.stationId)}
             radar={e.status !== 'anomaly' || showAnomalyRadar || (e.kind === 'station' && e.stationId === selectedStationId)}
+            simulatedFaultActive={e.simulatedFaultActive}
             onSelect={() => {
               if (e.kind === 'cluster' && e.clusterId !== undefined) expandCluster(e.clusterId, e.lngLat);
               else if (e.stationId) onSelectRef.current(e.stationId);

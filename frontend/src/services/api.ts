@@ -103,7 +103,7 @@ export async function runSimulation(scenarioId: string, baseStationId?: string |
 
 /** Incident sources shown operationally: real AWS telemetry and the clearly
  *  labelled simulated feed. Static-snapshot and Test Lab records are excluded. */
-export const OPERATIONAL_INCIDENT_SOURCES = 'LIVE_AWS,SIMULATED_FEED';
+export const OPERATIONAL_INCIDENT_SOURCES = 'LIVE_AWS';
 
 export async function fetchIncidents(status?: string | null, stationId?: string, source: string = OPERATIONAL_INCIDENT_SOURCES): Promise<{ incidents: any[] }> {
   const query = new URLSearchParams();
@@ -116,8 +116,8 @@ export async function fetchIncidents(status?: string | null, stationId?: string,
   return res.json();
 }
 
-export async function fetchActiveIncidentCounts(): Promise<Record<string, number>> {
-  const res = await fetch(`${API_BASE}/incidents/active-counts?source=${OPERATIONAL_INCIDENT_SOURCES}`);
+export async function fetchActiveIncidentCounts(source: string = OPERATIONAL_INCIDENT_SOURCES): Promise<Record<string, number>> {
+  const res = await fetch(`${API_BASE}/incidents/active-counts?source=${encodeURIComponent(source)}`);
   if (!res.ok) throw new Error(`Failed to fetch active incident counts: ${res.statusText}`);
   return res.json();
 }

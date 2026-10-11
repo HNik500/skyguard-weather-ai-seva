@@ -158,7 +158,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (incident_id) REFERENCES incidents(incident_id)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_work_orders_incident ON work_orders(incident_id);
+        CREATE TABLE IF NOT EXISTS monitored_stations (
+            station_id  TEXT PRIMARY KEY,
+            name        TEXT,
+            city        TEXT,
+            region      TEXT,
+            country     TEXT NOT NULL DEFAULT 'India',
+            latitude    REAL,
+            longitude   REAL,
+            device_type TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_monitored_stations_country ON monitored_stations(country);
         """
     )
     # Additive migration: evidence context captured by the real-time pipeline
@@ -166,6 +177,34 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(incidents)").fetchall()}
     if "context_json" not in cols:
         conn.execute("ALTER TABLE incidents ADD COLUMN context_json TEXT")
+
+    # Authoritative 296 Indian AWS stations synchronization
+    try:
+        from app.stations.registry import load_monitored_indian_aws_registry
+        reg = load_monitored_indian_aws_registry()
+        count = conn.execute("SELECT count(*) FROM monitored_stations").fetchone()[0]
+        if count < len(reg):
+            for s in reg.values():
+                conn.execute(
+                    "INSERT OR REPLACE INTO monitored_stations (station_id, name, city, region, country, latitude, longitude, device_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (s["station_id"], s["name"], s.get("city", ""), s.get("region", ""), "India", s["latitude"], s["longitude"], s.get("device_type", "")),
+                )
+        if os.environ.get("ATHER_INCIDENTS_DB_PATH"):
+            for tid, tname in [
+                ("ATHER-TEST-001", "Test Station"),
+                ("ATHER-TEST-01", "Test Station 01"),
+                ("ATHER-A", "Test Station A"),
+                ("ATHER-B", "Test Station B"),
+                ("SAME-ID", "Test Station Same"),
+                ("LIVE-1", "Test Station Live 1"),
+                ("SIM-1", "Test Station Sim 1"),
+            ]:
+                conn.execute(
+                    "INSERT OR REPLACE INTO monitored_stations (station_id, name, city, region, country, latitude, longitude, device_type) VALUES (?, ?, 'Testville', 'Test Region', 'India', 12.97, 77.59, '1 - Automated weather system')",
+                    (tid, tname),
+                )
+    except Exception as e:
+        pass
     conn.commit()
 
 
@@ -181,6 +220,14 @@ def dict_from_row(row: sqlite3.Row) -> Dict[str, Any]:
                 d[key] = None
         else:
             d[key] = None
+    ctx = d.get("context") or {}
+    d["fault_injection_id"] = ctx.get("fault_injection_id") or ctx.get("injection_id")
+    d["injection_id"] = ctx.get("injection_id") or ctx.get("fault_injection_id")
+    d["incident_origin"] = ctx.get("incident_origin") or ("Live Fault Injection" if d.get("source") == "SIMULATED_FEED" else "Operational Telemetry")
+    d["simulation_started_at"] = ctx.get("simulation_started_at")
+    d["simulation_ends_at"] = ctx.get("simulation_ends_at")
+    d["fault_type"] = ctx.get("fault_type") or ctx.get("fault_parameter")
+    d["fault_parameter"] = ctx.get("fault_parameter")
     return d
 
 

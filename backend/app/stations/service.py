@@ -509,7 +509,14 @@ class StationService:
         years-old snapshot is not presented as live operational state."""
         if source is None:
             fresh = _enum_val(stn.get("freshness"))
-            source = "STATIC_SNAPSHOT" if fresh in (None, "UNKNOWN", "MISSING") else "LIVE_AWS"
+            try:
+                from .registry import is_monitored_indian_aws
+                if not is_monitored_indian_aws(stn.get("id")):
+                    source = "STATIC_SNAPSHOT"
+                else:
+                    source = "STATIC_SNAPSHOT" if fresh in (None, "UNKNOWN", "MISSING") else "LIVE_AWS"
+            except Exception:
+                source = "STATIC_SNAPSHOT" if fresh in (None, "UNKNOWN", "MISSING") else "LIVE_AWS"
         try:
             snapshot = self._build_incident_snapshot(stn, source=source)
             if snapshot:

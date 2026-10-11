@@ -11,6 +11,7 @@ interface Props {
   stations: { id: string; name: string }[];
   onOpenIncident: (id: string) => void;
   onViewStation: (id: string) => void;
+  onShowOnMap?: (id: string) => void;
   onClose: () => void;
 }
 
@@ -27,9 +28,14 @@ function useSimStations() {
 }
 
 // ── live fault injection ─────────────────────────────────────────────────
-const LiveInjection: React.FC<{ types: any; onOpenIncident: (id: string) => void; onViewStation: (id: string) => void }> = ({ types, onOpenIncident, onViewStation }) => {
+const LiveInjection: React.FC<{
+  types: any;
+  onOpenIncident: (id: string) => void;
+  onViewStation: (id: string) => void;
+  onShowOnMap?: (id: string) => void;
+}> = ({ types, onOpenIncident, onViewStation, onShowOnMap }) => {
   const simStations = useSimStations();
-  const { stations } = useLive();
+  const { stations, applyFaultOptimistic } = useLive();
   const [stationId, setStationId] = useState('');
   const [faultType, setFaultType] = useState('spike');
   const [parameter, setParameter] = useState('temperature');
@@ -37,6 +43,7 @@ const LiveInjection: React.FC<{ types: any; onOpenIncident: (id: string) => void
   const [duration, setDuration] = useState(10);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ackNotice, setAckNotice] = useState<{ id: string; stationId: string; label: string } | null>(null);
   const [faults, setFaults] = useState<any[]>([]);
   const [watch, setWatch] = useState<{ fault: any; injectedAt: number; rows: any[]; incident?: any; firstAlarm?: number; weather?: number } | null>(null);
 
@@ -49,7 +56,7 @@ const LiveInjection: React.FC<{ types: any; onOpenIncident: (id: string) => void
   useLiveEvents(['FAULT_INJECTED', 'FAULT_CLEARED'], refreshFaults);
 
   // Follow the target station's detections as they stream in.
-  useLiveEvents(['STATION_UPDATED', 'INCIDENT_CREATED', 'WEATHER_EVENT_DETECTED'], (e) => {
+  useLiveEvents(['STATION_UPDATED', 'INCIDENT_CREATED', 'INCIDENT_UPDATED', 'WEATHER_EVENT_DETECTED'], (e) => {
     if (!watch) return;
     const d = e.data;
     const affected = watch.fault.fault_type === 'regional_event'
@@ -58,32 +65,58 @@ const LiveInjection: React.FC<{ types: any; onOpenIncident: (id: string) => void
     if (!affected) return;
     setWatch((w) => {
       if (!w) return w;
-      if (e.type === 'INCIDENT_CREATED') return { ...w, incident: w.incident || d };
+      if (e.type === 'INCIDENT_CREATED' || e.type === 'INCIDENT_UPDATED') {
+        return { ...w, incident: w.incident || d };
+      }
       if (e.type === 'WEATHER_EVENT_DETECTED') return { ...w, weather: w.weather ?? Date.now() };
       if (d.station_id !== w.fault.station_id) return w;
       const alarm = d.overall_status === 'suspect' || d.overall_status === 'anomaly';
+      const inc = w.incident || (d.active_incident_id ? { incident_id: d.active_incident_id } : undefined);
       return {
         ...w,
         rows: [{ ...d, at: Date.now() }, ...w.rows].slice(0, 60),
         firstAlarm: w.firstAlarm ?? (alarm ? Date.now() : undefined),
+        incident: inc,
       };
     });
   });
 
   const inject = async () => {
-    setBusy(true); setError(null);
+    if (busy || !stationId) return;
+    setBusy(true); setError(null); setAckNotice(null);
     try {
       const f = await injectFault({
         station_id: stationId, fault_type: faultType, parameter: spec?.parameters?.length ? parameter : null,
         severity, duration_minutes: duration,
       });
+
+      // Immediate UI & Live Map state update (<10ms)
+      applyFaultOptimistic({
+        ...f,
+        station_id: stationId,
+        parameter: spec?.parameters?.length ? parameter : null,
+        severity,
+        duration_minutes: duration,
+        detection_status: 'accepted',
+      });
+
+      setAckNotice({
+        id: f.injection_id || f.fault_id,
+        stationId: f.station_id || stationId,
+        label: f.label || faultType,
+      });
       setWatch({ fault: f, injectedAt: Date.now(), rows: [] });
       refreshFaults();
-    } catch (e: any) { setError(e.message); } finally { setBusy(false); }
+    } catch (e: any) {
+      setError(e.message || 'Fault injection failed');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const secs = (t?: number) => (t && watch ? `${Math.round((t - watch.injectedAt) / 1000)} s after injection` : '—');
   const target = watch ? stations.get(watch.fault.station_id) : null;
+  const detectionStatus = target?.fault_detection_status || (target?.overall_status === 'anomaly' ? 'detected' : 'processing');
 
   if (!types?.simulation_enabled) {
     return <Empty>Live fault injection needs the simulated AWS feed (ATHER_SIM_ENABLED=1). Replay and the scenario suite still work.</Empty>;
@@ -93,34 +126,35 @@ const LiveInjection: React.FC<{ types: any; onOpenIncident: (id: string) => void
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Card title="Inject a fault into the live network" icon={<Syringe size={14} />}>
         <div className="lv-callout warn" style={{ marginBottom: 12 }}>
-          Faults are applied to the <b>simulated</b> AWS feed only, at the next observation (every {types.cadence_s}s per station).
-          SkyGuard AI is not told a fault exists — it has to find it through the same pipeline as any other observation.
+          Faults are applied to the <b>simulated</b> AWS feed only. Acknowledgement is immediate and the station is visibly marked on the Live Map instantly. The SkyGuard AI anomaly detection pipeline evaluates the observation promptly without waiting for the full-network cycle.
         </div>
-        <div className="lv-form">
+        <div className="lv-form sg-testlab-form">
           <label className="lv-field">Station
-            <select value={stationId} onChange={(e) => setStationId(e.target.value)}>
+            <select value={stationId} onChange={(e) => setStationId(e.target.value)} disabled={busy}>
               {simStations.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.id})</option>)}
             </select>
           </label>
           <label className="lv-field">Failure type
-            <select value={faultType} onChange={(e) => setFaultType(e.target.value)}>
+            <select value={faultType} onChange={(e) => setFaultType(e.target.value)} disabled={busy}>
               {types.fault_types.map((f: any) => <option key={f.id} value={f.id}>{f.label}</option>)}
             </select>
           </label>
           <label className="lv-field">Parameter
-            <select value={parameter} onChange={(e) => setParameter(e.target.value)} disabled={!spec?.parameters?.length}>
+            <select value={parameter} onChange={(e) => setParameter(e.target.value)} disabled={busy || !spec?.parameters?.length}>
               {(spec?.parameters?.length ? spec.parameters : ['—']).map((p: string) => <option key={p} value={p}>{PARAM_LABEL[p] || p}</option>)}
             </select>
           </label>
           <label className="lv-field">Severity
-            <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
+            <select value={severity} onChange={(e) => setSeverity(e.target.value)} disabled={busy}>
               {types.severities.map((s: string) => <option key={s} value={s}>{s}</option>)}
             </select>
           </label>
           <label className="lv-field">Duration (min)
-            <input type="number" min={1} max={240} value={duration} onChange={(e) => setDuration(Number(e.target.value))} />
+            <input type="number" min={1} max={240} value={duration} onChange={(e) => setDuration(Number(e.target.value))} disabled={busy} />
           </label>
-          <button className="lv-btn lv-btn-primary" onClick={inject} disabled={busy || !stationId}><Syringe size={14} />Inject fault</button>
+          <button className="lv-btn lv-btn-primary sg-inject-btn" onClick={inject} disabled={busy || !stationId}>
+            <Syringe size={14} />{busy ? 'Injecting…' : 'Inject fault'}
+          </button>
         </div>
         {spec && (
           <p className="lv-muted" style={{ marginTop: 10 }}>
@@ -128,21 +162,100 @@ const LiveInjection: React.FC<{ types: any; onOpenIncident: (id: string) => void
             {' '}{INTERPRETATION_LABEL[spec.expected_interpretation] || spec.expected_interpretation}. Expected time to detection: {spec.expected_time_to_detection}.
           </p>
         )}
+        {ackNotice && (
+          <div
+            className="lv-callout ok"
+            style={{
+              marginTop: 10,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              background: 'rgba(168, 85, 247, 0.1)',
+              borderColor: 'rgba(168, 85, 247, 0.4)',
+              color: '#f3e8ff',
+            }}
+          >
+            <div>
+              <b>Simulation Active:</b> Injected {ackNotice.label} into {ackNotice.stationId} (ID: <span className="lv-mono">{ackNotice.id}</span>). Live Map marker updated.
+            </div>
+            {onShowOnMap && (
+              <button
+                className="lv-btn lv-btn-sm"
+                onClick={() => onShowOnMap(ackNotice.stationId)}
+                style={{ marginLeft: 12, background: 'rgba(168, 85, 247, 0.3)', border: '1px solid rgba(168, 85, 247, 0.6)' }}
+              >
+                View on Live Map
+              </button>
+            )}
+          </div>
+        )}
         {error && <div className="lv-callout danger" style={{ marginTop: 8 }}>{error}</div>}
       </Card>
 
       {watch && (
-        <Card title={`Watching ${watch.fault.station_id} — ${watch.fault.label}`} icon={<Radio size={14} />}
-          right={<button className="lv-link" onClick={() => onViewStation(watch.fault.station_id)}>Open station</button>}>
+        <Card
+          title={`Watching ${watch.fault.station_id} — ${watch.fault.label}`}
+          icon={<Radio size={14} />}
+          right={
+            <div className="lv-row">
+              {onShowOnMap && (
+                <button className="lv-link" onClick={() => onShowOnMap(watch.fault.station_id)}>
+                  View on Live Map
+                </button>
+              )}
+              <button className="lv-link" onClick={() => onViewStation(watch.fault.station_id)}>
+                Open station
+              </button>
+            </div>
+          }
+        >
           <div className="lv-stats" style={{ marginBottom: 12 }}>
-            <div className="lv-stat"><span className="lv-stat-lbl">Current status</span><span>{target ? <StatusPill status={target.overall_status} watch={target.watch} /> : '—'}</span></div>
+            <div className="lv-stat">
+              <span className="lv-stat-lbl">Simulation status</span>
+              <span>
+                <span
+                  className="lv-pill"
+                  style={{
+                    background: 'rgba(168, 85, 247, 0.15)',
+                    color: '#c084fc',
+                    border: '1px solid rgba(168, 85, 247, 0.4)',
+                    fontWeight: 700,
+                  }}
+                >
+                  SIMULATION ACTIVE
+                </span>
+              </span>
+            </div>
+            <div className="lv-stat">
+              <span className="lv-stat-lbl">Detection Engine Result</span>
+              <span>
+                {detectionStatus === 'detected' ? (
+                  <span className="lv-pill lv-status-anomaly" style={{ fontWeight: 700 }}>
+                    Anomaly Confirmed
+                  </span>
+                ) : detectionStatus === 'not_detected' ? (
+                  <span className="lv-pill lv-status-nominal" style={{ fontWeight: 700 }}>
+                    Not Detected
+                  </span>
+                ) : (
+                  <span className="lv-pill lv-status-suspect" style={{ fontWeight: 700 }}>
+                    Evaluating…
+                  </span>
+                )}
+              </span>
+            </div>
             <div className="lv-stat"><span className="lv-stat-lbl">First alarm</span><span className="lv-stat-sub" style={{ color: 'var(--lv-ink)', fontWeight: 700 }}>{secs(watch.firstAlarm)}</span></div>
-            <div className="lv-stat"><span className="lv-stat-lbl">Weather classification</span><span className="lv-stat-sub" style={{ color: 'var(--lv-ink)', fontWeight: 700 }}>{secs(watch.weather)}</span></div>
-            <div className="lv-stat"><span className="lv-stat-lbl">Incident</span>
-              {watch.incident ? <button className="lv-link" onClick={() => onOpenIncident(watch.incident.incident_id)}>{watch.incident.incident_id}</button> : <span className="lv-stat-sub">none yet</span>}
+            <div className="lv-stat"><span className="lv-stat-lbl">Incident [Simulated]</span>
+              {watch.incident ? (
+                <button className="lv-link" onClick={() => onOpenIncident(watch.incident.incident_id)} style={{ fontWeight: 700, color: '#c084fc' }}>
+                  {watch.incident.incident_id}
+                </button>
+              ) : (
+                <span className="lv-stat-sub">{detectionStatus === 'not_detected' ? 'none (not detected)' : 'evaluating…'}</span>
+              )}
             </div>
           </div>
-          {!watch.rows.length ? <Empty>Waiting for the next observation from this station…</Empty> : (
+          {!watch.rows.length ? <Empty>Waiting for the targeted evaluation result from this station…</Empty> : (
             <div className="lv-table-wrap lv-scroll">
               <table className="lv-table">
                 <thead><tr><th>Observed</th><th>Status</th><th>Conf.</th><th>Layers</th><th>Interpretation</th><th>{PARAM_LABEL[watch.fault.parameter] || 'Temp'}</th><th>Summary</th></tr></thead>
@@ -171,16 +284,36 @@ const LiveInjection: React.FC<{ types: any; onOpenIncident: (id: string) => void
         {!faults.length ? <Empty>No faults injected yet.</Empty> : (
           <div className="lv-table-wrap">
             <table className="lv-table">
-              <thead><tr><th>Fault</th><th>Station</th><th>Parameter</th><th>Severity</th><th>Started</th><th>Ends</th><th>State</th><th /></tr></thead>
+              <thead><tr><th>Fault</th><th>Station</th><th>Parameter</th><th>Severity</th><th>Started</th><th>Ends</th><th>State</th><th>Actions</th></tr></thead>
               <tbody>
                 {faults.map((f) => (
                   <tr key={f.fault_id}>
                     <td>{f.label}</td>
-                    <td><button className="lv-link" onClick={() => onViewStation(f.station_id)}>{f.station_id}</button>{f.affected_station_ids?.length > 1 ? ` +${f.affected_station_ids.length - 1}` : ''}</td>
+                    <td>
+                      <button className="lv-link" onClick={() => onViewStation(f.station_id)}>{f.station_id}</button>
+                      {f.affected_station_ids?.length > 1 ? ` +${f.affected_station_ids.length - 1}` : ''}
+                    </td>
                     <td>{f.parameter || '—'}</td><td>{f.severity}</td>
                     <td>{fmtTime(f.started_at_iso)}</td><td>{fmtTime(f.ends_at_iso)}</td>
-                    <td>{f.state}</td>
-                    <td>{f.state === 'ACTIVE' && <button className="lv-btn lv-btn-danger" onClick={() => cancelFault(f.fault_id).then(refreshFaults)}><Square size={12} />Stop</button>}</td>
+                    <td>
+                      <span className={`lv-pill lv-pill-sm ${f.state === 'ACTIVE' ? 'lv-status-suspect' : 'lv-status-nominal'}`}>
+                        {f.state}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="lv-row" style={{ gap: 6 }}>
+                        {onShowOnMap && (
+                          <button className="lv-btn lv-btn-sm" onClick={() => onShowOnMap(f.station_id)}>
+                            Map
+                          </button>
+                        )}
+                        {f.state === 'ACTIVE' && (
+                          <button className="lv-btn lv-btn-danger lv-btn-sm" onClick={() => cancelFault(f.fault_id).then(refreshFaults)}>
+                            <Square size={12} />Stop
+                          </button>
+                        )}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -368,7 +501,7 @@ const ReplayPanel: React.FC<{ types: any; catalogue: { id: string; name: string 
 };
 
 // ── workspace ────────────────────────────────────────────────────────────
-export const TestLabWorkspace: React.FC<Props> = ({ stations, onOpenIncident, onViewStation }) => {
+export const TestLabWorkspace: React.FC<Props> = ({ stations, onOpenIncident, onViewStation, onShowOnMap }) => {
   const [tab, setTab] = useState<'suite' | 'live' | 'replay'>('suite');
   const [types, setTypes] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -384,7 +517,7 @@ export const TestLabWorkspace: React.FC<Props> = ({ stations, onOpenIncident, on
             run through the same five layers, fusion and root-cause logic as operations.
             For each case: input → layer responses → fusion → anomaly decision → root cause → operational response. Scenario-suite results stay separate from operational incidents.</p>
         </div>
-        <div className="lv-tabs">
+        <div className="lv-tabs sg-testlab-tabs">
           <button className={`lv-tab ${tab === 'suite' ? 'active' : ''}`} onClick={() => setTab('suite')}><ListChecks size={13} />Scenario suite</button>
           <button className={`lv-tab ${tab === 'live' ? 'active' : ''}`} onClick={() => setTab('live')}><Syringe size={13} />Live fault injection</button>
           <button className={`lv-tab ${tab === 'replay' ? 'active' : ''}`} onClick={() => setTab('replay')}><History size={13} />Replay</button>
@@ -397,7 +530,9 @@ export const TestLabWorkspace: React.FC<Props> = ({ stations, onOpenIncident, on
       </div>
       {error && tab !== 'suite' && <div className="lv-callout danger">Real-time pipeline unavailable: {error}</div>}
       {tab === 'suite' && <ScenarioSuite />}
-      {tab === 'live' && types && <LiveInjection types={types} onOpenIncident={onOpenIncident} onViewStation={onViewStation} />}
+      {tab === 'live' && types && (
+        <LiveInjection types={types} onOpenIncident={onOpenIncident} onViewStation={onViewStation} onShowOnMap={onShowOnMap} />
+      )}
       {tab === 'replay' && types && <ReplayPanel types={types} catalogue={stations} />}
     </div>
   );

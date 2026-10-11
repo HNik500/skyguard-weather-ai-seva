@@ -35,17 +35,47 @@ const TONE: Record<string, string> = { new: 'lv-status-suspect', active: 'lv-sta
  * (acknowledge → investigate → action/work order → resolve) and produces
  * the report. The technical deep dive lives in Investigations.
  */
+type SourceFilter = 'operational' | 'simulated' | 'all';
+const SOURCE_PARAM: Record<SourceFilter, string> = {
+  operational: 'LIVE_AWS',
+  simulated: 'SIMULATED_FEED',
+  all: 'LIVE_AWS,SIMULATED_FEED,STATIC_SNAPSHOT',
+};
+
 export const IncidentsWorkspace: React.FC<Props> = ({ openIncidentId, onOpenIncident, onInvestigate, onOpenStation, onShowOnMap }) => {
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('operational');
   const [all, setAll] = useState<any[] | null>(null);
   const [view, setView] = useState<View>('open');
   const [error, setError] = useState<string | null>(null);
   const last = useRef(0);
 
-  const load = () => fetchIncidents(null).then((r) => setAll(r.incidents || [])).catch((e) => setError(e.message));
-  useEffect(() => { load(); }, []);
-  useLiveEvents(['INCIDENT_CREATED', 'INCIDENT_UPDATED'], () => {
-    if (Date.now() - last.current > 2000) { last.current = Date.now(); load(); }
+  const load = () => {
+    fetchIncidents(null, undefined, SOURCE_PARAM[sourceFilter])
+      .then((r) => setAll(r.incidents || []))
+      .catch((e) => setError(e.message));
+  };
+
+  useEffect(() => { load(); }, [sourceFilter]);
+  useLiveEvents(['INCIDENT_CREATED', 'INCIDENT_UPDATED', 'STATION_UPDATED'], () => {
+    if (Date.now() - last.current > 1000) { last.current = Date.now(); load(); }
   });
+
+  useEffect(() => {
+    if (openIncidentId) {
+      fetchIncidentDetail(openIncidentId)
+        .then((detail) => {
+          if (detail) {
+            const isSim = detail.source === 'SIMULATED_FEED' || detail.incident_origin === 'Live Fault Injection' || Boolean(detail.fault_injection_id || detail.injection_id);
+            if (isSim && sourceFilter === 'operational') {
+              setSourceFilter('simulated');
+            } else if (!isSim && sourceFilter === 'simulated') {
+              setSourceFilter('operational');
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [openIncidentId]);
 
   const counts = useMemo(() => {
     const a = all || [];
@@ -72,42 +102,223 @@ export const IncidentsWorkspace: React.FC<Props> = ({ openIncidentId, onOpenInci
       <div className="lv-page-head">
         <div>
           <div className="a-eyebrow">Incidents</div>
-          <h1 className="a-h1">{counts.open} open incident{counts.open === 1 ? '' : 's'}{counts.critical ? ` · ${counts.critical} critical` : ''}{counts.action ? ` · ${counts.action} awaiting action` : ''}</h1>
-          <p className="a-lead">Opened automatically when fused evidence confirms a sensor problem. Monitor → detect → explain → respond → resolve.</p>
+          <h1 className="a-h1">
+            {counts.open} open {sourceFilter === 'operational' ? 'operational ' : sourceFilter === 'simulated' ? 'simulated ' : ''}incident{counts.open === 1 ? '' : 's'}
+            {counts.critical ? ` · ${counts.critical} critical` : ''}
+            {counts.action ? ` · ${counts.action} awaiting action` : ''}
+          </h1>
+          <p className="a-lead">
+            {sourceFilter === 'operational'
+              ? 'Operational incidents detected on live automatic weather station telemetry (LIVE_AWS).'
+              : sourceFilter === 'simulated'
+              ? 'Incidents originating from the simulated AWS feed and Live Fault Injection (SIMULATED_FEED).'
+              : 'All recorded incidents across operational telemetry and simulations.'}
+          </p>
+        </div>
+        <div className="lv-row sg-inc-source-row" style={{ gap: 8 }}>
+          <div className="a-filter-group sg-source-filter">
+            <button
+              className={sourceFilter === 'operational' ? 'active' : ''}
+              onClick={() => setSourceFilter('operational')}
+              title="Real AWS telemetry incidents"
+            >
+              Operational AWS
+            </button>
+            <button
+              className={sourceFilter === 'simulated' ? 'active' : ''}
+              onClick={() => setSourceFilter('simulated')}
+              title="Simulated mesonet and live fault injection incidents"
+            >
+              Simulated / Fault Injection
+            </button>
+            <button
+              className={sourceFilter === 'all' ? 'active' : ''}
+              onClick={() => setSourceFilter('all')}
+              title="All incident sources"
+            >
+              All Sources
+            </button>
+          </div>
         </div>
       </div>
       {error && <div className="lv-callout danger">{error}</div>}
 
       <Card title="Incident queue" icon={<ClipboardList size={14} />}
-        right={<div className="lv-tabs">{([['open', 'Open'], ['action', 'Action required'], ['closed', 'Closed'], ['all', 'All']] as [View, string][]).map(([k, l]) => (
+        right={<div className="lv-tabs sg-queue-tabs">{([['open', 'Open'], ['action', 'Action required'], ['closed', 'Closed'], ['all', 'All']] as [View, string][]).map(([k, l]) => (
           <button key={k} className={`lv-tab ${view === k ? 'active' : ''}`} onClick={() => setView(k)}>{l} <span className="lv-mono" style={{ fontSize: '0.64rem', color: 'var(--a-ink-3)' }}>{counts[k]}</span></button>
         ))}</div>}>
         {all === null ? <Empty>Loading…</Empty> : !list.length ? <Empty>{view === 'open' ? 'No open incidents. Normal stations do not open incidents.' : 'No incidents in this view.'}</Empty> : (
-          <div className="lv-table-wrap sg-queue">
-            <table className="lv-table">
-              <thead><tr><th>Incident</th><th>Station</th><th>Sensor</th><th>Finding</th><th>Severity</th><th>Status</th><th>Detected</th></tr></thead>
-              <tbody>
-                {list.map((i) => {
-                  const st = opsStatus(i);
-                  return (
-                    <tr key={i.incident_id} className={`clickable ${openIncidentId === i.incident_id ? 'selected' : ''}`} onClick={() => onOpenIncident(i.incident_id)}>
-                      <td className="lv-mono" style={{ fontSize: '0.72rem' }}>{i.incident_id}</td>
-                      <td>{i.station_name || i.station_id}{i.source === 'SIMULATED_FEED' && <div><SourceBadge simulated /></div>}</td>
-                      <td>{i.parameter}</td>
-                      <td>{i.context?.rca_label || human(i.root_cause)}</td>
-                      <td><span className={`lv-pill lv-pill-sm ${i.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}>{i.severity}</span></td>
-                      <td><span className={`lv-pill lv-pill-sm ${TONE[st.tone]}`}>{st.label}</span></td>
-                      <td className="lv-muted">{formatAge(i.detected_at)}</td>
+          <>
+            {/* Desktop / Tablet Table View */}
+            <div className="lv-table-wrap sg-queue sg-desktop-table">
+              <table className="lv-table">
+                {sourceFilter === 'simulated' ? (
+                  <thead>
+                    <tr>
+                      <th>Incident</th>
+                      <th>Injection ID</th>
+                      <th>Station</th>
+                      <th>Fault Type</th>
+                      <th>Severity</th>
+                      <th>Detected</th>
+                      <th>Detection Result</th>
+                      <th>Status</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                ) : sourceFilter === 'all' ? (
+                  <thead>
+                    <tr>
+                      <th>Incident</th>
+                      <th>Source</th>
+                      <th>Station</th>
+                      <th>Finding / Sensor</th>
+                      <th>Severity</th>
+                      <th>Status</th>
+                      <th>Detected</th>
+                    </tr>
+                  </thead>
+                ) : (
+                  <thead>
+                    <tr>
+                      <th>Incident</th>
+                      <th>Station</th>
+                      <th>Sensor</th>
+                      <th>Finding</th>
+                      <th>Severity</th>
+                      <th>Status</th>
+                      <th>Detected</th>
+                    </tr>
+                  </thead>
+                )}
+                <tbody>
+                  {list.map((i) => {
+                    const st = opsStatus(i);
+                    const isSim = i.source === 'SIMULATED_FEED' || i.incident_origin === 'Live Fault Injection' || Boolean(i.fault_injection_id || i.context?.fault_injection_id);
+                    const injId = i.injection_id || i.fault_injection_id || i.context?.injection_id || i.context?.fault_injection_id;
+                    const faultTypeLabel = i.context?.fault_type || i.fault_type || (i.parameter ? `${i.parameter} spike` : human(i.root_cause));
+                    const detResult = i.context?.rca_label || human(i.root_cause) || (i.severity === 'CRITICAL' ? 'Confirmed Anomaly' : 'Anomaly Detected');
+
+                    if (sourceFilter === 'simulated') {
+                      return (
+                        <tr key={i.incident_id} className={`clickable ${openIncidentId === i.incident_id ? 'selected' : ''}`} onClick={() => onOpenIncident(i.incident_id)}>
+                          <td className="lv-mono" style={{ fontSize: '0.72rem' }}>{i.incident_id}</td>
+                          <td className="lv-mono" style={{ fontSize: '0.72rem', color: '#c084fc' }}>{injId || '—'}</td>
+                          <td>
+                            {i.station_name || i.station_id}
+                            <div style={{ marginTop: 2 }}>
+                              <span className="lv-pill lv-pill-sm" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontWeight: 700 }}>
+                                LIVE FAULT INJECTION
+                              </span>
+                            </div>
+                          </td>
+                          <td style={{ textTransform: 'capitalize' }}>{faultTypeLabel}</td>
+                          <td><span className={`lv-pill lv-pill-sm ${i.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}>{i.severity}</span></td>
+                          <td className="lv-muted">{formatAge(i.detected_at)}</td>
+                          <td><span style={{ color: '#ef4444', fontWeight: 600 }}>Confirmed Anomaly</span> <span className="lv-muted" style={{ fontSize: '0.72rem' }}>({detResult})</span></td>
+                          <td><span className={`lv-pill lv-pill-sm ${TONE[st.tone]}`}>{st.label}</span></td>
+                        </tr>
+                      );
+                    }
+
+                    if (sourceFilter === 'all') {
+                      return (
+                        <tr key={i.incident_id} className={`clickable ${openIncidentId === i.incident_id ? 'selected' : ''}`} onClick={() => onOpenIncident(i.incident_id)}>
+                          <td className="lv-mono" style={{ fontSize: '0.72rem' }}>{i.incident_id}</td>
+                          <td>
+                            {isSim ? (
+                              <span className="lv-pill lv-pill-sm" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontWeight: 700 }}>
+                                SIMULATED
+                              </span>
+                            ) : (
+                              <span className="lv-pill lv-pill-sm lv-status-nominal" style={{ fontWeight: 700 }}>
+                                OPERATIONAL AWS
+                              </span>
+                            )}
+                          </td>
+                          <td>{i.station_name || i.station_id}</td>
+                          <td>{i.context?.rca_label || human(i.root_cause)} <span className="lv-muted" style={{ fontSize: '0.72rem' }}>({i.parameter})</span></td>
+                          <td><span className={`lv-pill lv-pill-sm ${i.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}>{i.severity}</span></td>
+                          <td><span className={`lv-pill lv-pill-sm ${TONE[st.tone]}`}>{st.label}</span></td>
+                          <td className="lv-muted">{formatAge(i.detected_at)}</td>
+                        </tr>
+                      );
+                    }
+
+                    return (
+                      <tr key={i.incident_id} className={`clickable ${openIncidentId === i.incident_id ? 'selected' : ''}`} onClick={() => onOpenIncident(i.incident_id)}>
+                        <td className="lv-mono" style={{ fontSize: '0.72rem' }}>{i.incident_id}</td>
+                        <td>
+                          {i.station_name || i.station_id}
+                          {isSim ? (
+                            <div style={{ marginTop: 2 }}><SourceBadge simulated /></div>
+                          ) : null}
+                        </td>
+                        <td>{i.parameter}</td>
+                        <td>{i.context?.rca_label || human(i.root_cause)}</td>
+                        <td><span className={`lv-pill lv-pill-sm ${i.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}>{i.severity}</span></td>
+                        <td><span className={`lv-pill lv-pill-sm ${TONE[st.tone]}`}>{st.label}</span></td>
+                        <td className="lv-muted">{formatAge(i.detected_at)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Mobile Touch Cards View (screens <= 768px) */}
+            <div className="sg-mobile-cards">
+              {list.map((i) => {
+                const st = opsStatus(i);
+                const isSim = i.source === 'SIMULATED_FEED' || i.incident_origin === 'Live Fault Injection' || Boolean(i.fault_injection_id || i.context?.fault_injection_id);
+                const injId = i.injection_id || i.fault_injection_id || i.context?.injection_id || i.context?.fault_injection_id;
+                const faultTypeLabel = i.context?.fault_type || i.fault_type || (i.parameter ? `${i.parameter} spike` : human(i.root_cause));
+                const finding = i.context?.rca_label || human(i.root_cause);
+                const isSelected = openIncidentId === i.incident_id;
+
+                return (
+                  <div
+                    key={i.incident_id}
+                    className={`sg-inc-card ${isSelected ? 'selected' : ''}`}
+                    onClick={() => onOpenIncident(i.incident_id)}
+                  >
+                    <div className="sg-inc-card-head">
+                      <span className="lv-mono sg-inc-card-id">{i.incident_id}</span>
+                      <div className="sg-inc-card-pills">
+                        <span className={`lv-pill lv-pill-sm ${i.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}>
+                          {i.severity}
+                        </span>
+                        <span className={`lv-pill lv-pill-sm ${TONE[st.tone]}`}>{st.label}</span>
+                      </div>
+                    </div>
+
+                    <div className="sg-inc-card-station">
+                      <b>{i.station_name || i.station_id}</b>
+                      <span className="lv-mono sg-inc-card-station-id">{i.station_id}</span>
+                    </div>
+
+                    <div className="sg-inc-card-body">
+                      <div><span className="sg-inc-card-lbl">Sensor:</span> <b style={{ textTransform: 'capitalize' }}>{i.parameter || 'All'}</b></div>
+                      <div><span className="sg-inc-card-lbl">Finding:</span> {faultTypeLabel || finding}</div>
+                      <div><span className="sg-inc-card-lbl">Detected:</span> {formatAge(i.detected_at)}</div>
+                    </div>
+
+                    {isSim && (
+                      <div className="sg-inc-card-badge-row">
+                        <span className="lv-pill lv-pill-sm" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontWeight: 700 }}>
+                          {i.incident_origin === 'Live Fault Injection' || injId ? 'LIVE FAULT INJECTION' : 'SIMULATED'}
+                        </span>
+                        {injId && <span className="lv-mono" style={{ fontSize: '0.68rem', color: '#c084fc' }}>{injId}</span>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </Card>
 
-      {openIncidentId && (all || []).some((i) => i.incident_id === openIncidentId) && (
+      {openIncidentId && (
         <IncidentPanel key={openIncidentId} incidentId={openIncidentId} onChanged={load}
           onInvestigate={onInvestigate} onOpenStation={onOpenStation} onShowOnMap={onShowOnMap} />
       )}
@@ -152,7 +363,13 @@ const IncidentPanel: React.FC<{
             </div>
             <div className="lv-row">
               <span className={`lv-pill ${inc.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}><span className="lv-dot" />{inc.severity}</span>
-              {inc.source === 'SIMULATED_FEED' && <SourceBadge simulated />}
+              {(inc.incident_origin === 'Live Fault Injection' || inc.context?.incident_origin === 'Live Fault Injection' || inc.fault_injection_id || inc.context?.fault_injection_id) ? (
+                <span className="lv-pill" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontWeight: 700 }}>
+                  LIVE FAULT INJECTION
+                </span>
+              ) : inc.source === 'SIMULATED_FEED' ? (
+                <SourceBadge simulated />
+              ) : null}
               <button className="lv-btn" onClick={() => onInvestigate(inc.incident_id)}><InvestigateIcon size={14} />Investigate</button>
               <button className="lv-btn" onClick={() => onOpenStation(inc.station_id)}>Open station</button>
               <button className="lv-btn" onClick={() => onShowOnMap(inc.station_id)}><MapPinned size={14} />Map</button>
@@ -178,6 +395,19 @@ const IncidentPanel: React.FC<{
         <Card title="What happened">
           <dl className="lv-kv">
             <dt>What</dt><dd>{ctx.summary || (inc.evidence || [])[0] || `${inc.parameter} anomaly`}</dd>
+            {(inc.incident_origin === 'Live Fault Injection' || inc.context?.incident_origin === 'Live Fault Injection' || inc.fault_injection_id || inc.context?.fault_injection_id) && (
+              <>
+                <dt>Incident origin</dt>
+                <dd>
+                  <span style={{ color: '#c084fc', fontWeight: 700 }}>Live Fault Injection (Test Lab Simulation)</span>
+                  {(inc.fault_injection_id || inc.context?.fault_injection_id) && (
+                    <span className="lv-mono lv-muted" style={{ marginLeft: 6 }}>
+                      ID: {inc.fault_injection_id || inc.context?.fault_injection_id}
+                    </span>
+                  )}
+                </dd>
+              </>
+            )}
             <dt>Where</dt><dd>{inc.station_name || inc.station_id} <span className="lv-mono lv-muted">{inc.station_id}</span>{inc.region ? ` · ${inc.region}` : ''}</dd>
             <dt>When</dt><dd>{fmtDateTime(ctx.first_observation_at || inc.detected_at)} ({formatAge(ctx.first_observation_at || inc.detected_at)})</dd>
             <dt>Affected sensor</dt><dd>{inc.parameter}</dd>

@@ -43,7 +43,12 @@ export const IncidentReport: React.FC<{ inc: any; onClose: () => void }> = ({ in
           <dl>
             <dt>Status</dt><dd>{status.label}</dd>
             <dt>Severity</dt><dd>{inc.severity}</dd>
-            <dt>Source</dt><dd>{inc.source === 'SIMULATED_FEED' ? 'Simulated AWS feed' : human(inc.source)}</dd>
+            <dt>Source</dt><dd>{(inc.incident_origin === 'Live Fault Injection' || inc.context?.incident_origin === 'Live Fault Injection') ? 'Live Fault Injection (Test Lab)' : inc.source === 'SIMULATED_FEED' ? 'Simulated AWS feed' : human(inc.source)}</dd>
+            {(inc.fault_injection_id || inc.context?.fault_injection_id) && (
+              <>
+                <dt>Injection ID</dt><dd className="lv-mono">{inc.fault_injection_id || inc.context?.fault_injection_id}</dd>
+              </>
+            )}
             <dt>Generated</dt><dd>{fmtDateTime(new Date().toISOString())}</dd>
           </dl>
         </header>
@@ -53,6 +58,21 @@ export const IncidentReport: React.FC<{ inc: any; onClose: () => void }> = ({ in
           <table className="sg-kv">
             <tbody>
               <tr><th>Station</th><td>{inc.station_name || '—'} <span className="lv-mono">{inc.station_id}</span>{inc.region ? ` · ${inc.region}` : ''}</td></tr>
+              {(inc.incident_origin === 'Live Fault Injection' || inc.context?.incident_origin === 'Live Fault Injection') && (
+                <tr>
+                  <th>Origin</th>
+                  <td>
+                    <span className="lv-pill lv-pill-sm" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontWeight: 700 }}>
+                      Live Fault Injection
+                    </span>
+                    {(inc.fault_injection_id || inc.context?.fault_injection_id) && (
+                      <span className="lv-mono" style={{ marginLeft: 6, fontSize: '0.8rem' }}>
+                        ID: {inc.fault_injection_id || inc.context?.fault_injection_id}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              )}
               <tr><th>First observed</th><td>{ctx.first_observation_at ? fmtDateTime(ctx.first_observation_at) : NR}</td></tr>
               <tr><th>Detected</th><td>{fmtDateTime(inc.detected_at)}</td></tr>
               <tr><th>Affected sensor</th><td>{inc.parameter || NR}</td></tr>

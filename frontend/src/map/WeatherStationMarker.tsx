@@ -76,6 +76,8 @@ interface WeatherStationMarkerProps {
   label?: string;
   /** One of the 3 nearest stations of the selected station: a thin highlight ring on the ground. */
   neighbor?: boolean;
+  /** Flag indicating an active simulated fault injection on this station */
+  simulatedFaultActive?: boolean;
   onSelect?: () => void;
 }
 
@@ -96,10 +98,12 @@ const WeatherStationMarkerBase: React.FC<WeatherStationMarkerProps> = ({
   countLabel,
   label: labelOverride,
   neighbor = false,
+  simulatedFaultActive = false,
   onSelect,
 }) => {
   const isCluster = (count ?? 1) > 1;
-  const label = labelOverride ?? `${name ?? 'Weather station'} — ${STATUS_LABEL[status]}`;
+  const isSim = !isCluster && simulatedFaultActive;
+  const label = labelOverride ?? `${name ?? 'Weather station'} — ${STATUS_LABEL[status]}${isSim ? ' (Simulated fault active)' : ''}`;
   const delay = -phaseFor(seed ?? name ?? '');
 
   return (
@@ -159,6 +163,13 @@ const WeatherStationMarkerBase: React.FC<WeatherStationMarkerProps> = ({
       {isCluster && (
         <span className="ws-count" aria-hidden="true">
           {countLabel ?? count}
+        </span>
+      )}
+
+      {/* Simulation indicator badge for individual active simulated stations */}
+      {!isCluster && isSim && (
+        <span className="ws-sim-badge" aria-label="Simulated fault active">
+          SIM
         </span>
       )}
     </div>

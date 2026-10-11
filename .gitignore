@@ -15,6 +15,7 @@ __pycache__/
 data/incidents.db
 data/incidents.db-wal
 data/incidents.db-shm
+data/incidents.db.backup*
 data/ather_timeseries.db
 data/ather_timeseries.db-wal
 data/ather_timeseries.db-shm

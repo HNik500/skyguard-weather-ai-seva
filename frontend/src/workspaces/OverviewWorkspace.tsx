@@ -98,7 +98,7 @@ export const OverviewWorkspace: React.FC<Props> = ({ stationsGeoJSON, onNavigate
             {warmup?.state === 'RUNNING' && <> Start-up: {warmup.stations_ready} of {warmup.stations_total} simulated stations live with current telemetry; the {warmup.history_stations ?? ''} stations around the baseline station are being warmed with {warmup.cycles} cycles of simulated history. Other stations build history from live cycles.</>}
           </p>
         </div>
-        <div className="lv-row">
+        <div className="lv-row sg-ov-actions">
           {obsSource?.simulated && <SourceBadge simulated />}
           {warmup?.demo_station_id && (
             <button className="lv-btn" title="Simulated station with the densest neighbourhood — the baseline for a normal-operation walkthrough"
@@ -109,7 +109,7 @@ export const OverviewWorkspace: React.FC<Props> = ({ stationsGeoJSON, onNavigate
         </div>
       </div>
 
-      <div className="lv-stats" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
+      <div className="lv-stats sg-overview-stats" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
         <div className="lv-stat"><span className="lv-stat-lbl">Monitored live</span><span className="lv-stat-val">{c.live_stations ?? '—'}</span>
           <span className="lv-stat-sub">AWS stations in the network</span></div>
         <div className="lv-stat nominal"><span className="lv-stat-lbl">Nominal</span><span className="lv-stat-val">{c.nominal ?? '—'}</span><span className="lv-stat-sub">fresh, no anomalous evidence</span></div>
@@ -120,25 +120,27 @@ export const OverviewWorkspace: React.FC<Props> = ({ stationsGeoJSON, onNavigate
           <span className="lv-stat-sub">{incidentCounts ? `${incidentCounts.critical ?? 0} critical · ${incidentCounts.new ?? 0} new` : ' '}</span></button>
       </div>
 
-      <div className="lv-grid-2" style={{ gridTemplateColumns: 'minmax(0, 1.25fr) minmax(0, 1fr)' }}>
+      <div className="lv-grid-2 sg-overview-grid" style={{ gridTemplateColumns: 'minmax(0, 1.25fr) minmax(0, 1fr)' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Card title="Active incidents" icon={<ShieldAlert size={14} />}
             right={<button className="lv-link" onClick={() => onNavigate('incidents')}>Open incident queue</button>}>
             {incidents === null ? <Empty>Loading…</Empty> : !incidents.length ? <Empty>No open incidents.</Empty> : (
-              <table className="lv-table">
-                <thead><tr><th>Incident</th><th>Station</th><th>Finding</th><th>Severity</th><th>Status</th></tr></thead>
-                <tbody>
-                  {incidents.slice(0, 6).map((i) => (
-                    <tr key={i.incident_id} className="clickable" onClick={() => onOpenIncident(i.incident_id)}>
-                      <td className="lv-mono" style={{ fontSize: '0.7rem' }}>{i.incident_id}</td>
-                      <td>{i.station_name || i.station_id}</td>
-                      <td>{i.parameter} · {i.context?.rca_label || human(i.root_cause)}</td>
-                      <td><span className={`lv-pill lv-pill-sm ${i.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}>{i.severity}</span></td>
-                      <td className="lv-muted">{opsStatus(i).label}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="lv-table-wrap">
+                <table className="lv-table">
+                  <thead><tr><th>Incident</th><th>Station</th><th>Finding</th><th>Severity</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {incidents.slice(0, 6).map((i) => (
+                      <tr key={i.incident_id} className="clickable" onClick={() => onOpenIncident(i.incident_id)}>
+                        <td className="lv-mono" style={{ fontSize: '0.7rem' }}>{i.incident_id}</td>
+                        <td>{i.station_name || i.station_id}</td>
+                        <td>{i.parameter} · {i.context?.rca_label || human(i.root_cause)}</td>
+                        <td><span className={`lv-pill lv-pill-sm ${i.severity === 'CRITICAL' ? 'lv-status-anomaly' : 'lv-status-suspect'}`}>{i.severity}</span></td>
+                        <td className="lv-muted">{opsStatus(i).label}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </Card>
 

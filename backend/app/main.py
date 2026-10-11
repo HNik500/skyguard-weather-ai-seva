@@ -306,17 +306,22 @@ def run_simulation(payload: Dict[str, Any]):
 # ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/incidents")
-def list_incidents(status: Optional[str] = None, station_id: Optional[str] = None, source: Optional[str] = "LIVE_AWS"):
-    """Lists persisted incidents. `source` defaults to LIVE_AWS only — a
-    Test Lab simulation incident is never returned here unless the caller
-    explicitly asks for source=TEST_SIMULATION (Phase 36)."""
-    return {"incidents": incident_service.list_all(status=status, source=source, station_id=station_id)}
+def list_incidents(
+    status: Optional[str] = None,
+    station_id: Optional[str] = None,
+    source: Optional[str] = "LIVE_AWS",
+    scope: Optional[str] = "india",
+):
+    """Lists persisted incidents. `source` defaults to LIVE_AWS only.
+    `scope` defaults to "india" — restricting operational incidents to the
+    configured 296 Indian AWS monitoring network."""
+    return {"incidents": incident_service.list_all(status=status, source=source, station_id=station_id, scope=scope)}
 
 @app.get("/api/incidents/active-counts")
-def get_active_incident_counts(source: Optional[str] = "LIVE_AWS"):
+def get_active_incident_counts(source: Optional[str] = "LIVE_AWS", scope: Optional[str] = "india"):
     """Real counts for the operational incident counter (Phase 24/43) —
-    derived from persisted incidents, not recomputed independently."""
-    return incident_service.get_active_counts(source=source)
+    derived from persisted incidents, scoped to the configured 296 Indian AWS network."""
+    return incident_service.get_active_counts(source=source, scope=scope)
 
 @app.get("/api/incidents/{incident_id}")
 def get_incident(incident_id: str):
@@ -423,11 +428,11 @@ def get_escalation_preview(incident_id: str):
     return preview
 
 @app.get("/api/stations/{station_id}/incidents")
-def get_station_incidents(station_id: str, source: Optional[str] = "LIVE_AWS"):
+def get_station_incidents(station_id: str, source: Optional[str] = "LIVE_AWS", scope: Optional[str] = "india"):
     """Incident history for a single station (Phase 21/27: Station
     Intelligence -> incident history). Returns persisted incidents only —
     never fabricates a record for a station that has never been actionable."""
-    return {"incidents": incident_service.list_all(source=source, station_id=station_id)}
+    return {"incidents": incident_service.list_all(source=source, station_id=station_id, scope=scope)}
 
 
 # ─────────────────────────────────────────────────────────────────
