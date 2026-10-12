@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ ATHER
+# ⚡ SkyguardAI
 ### Automated Telemetry Health & Environmental Reliability
 **Multi-Layered Real-Time Anomaly Detection & Incident Diagnostics Engine for Meteorological AWS Networks**
 
